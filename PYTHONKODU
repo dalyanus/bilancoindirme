@@ -1,0 +1,144 @@
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import os
+
+# Hisseleri bir Excel dosyasından oku
+hisse_dosyasi = "/Users/alikara/Desktop/BORSA OKUNACAKLAR/MALI TABLOLAR/kodlar.xlsx"
+hisseler_df = pd.read_excel(hisse_dosyasi)
+
+# Hisse kodlarını listeye çevir
+hisseler = hisseler_df['HisseKodu'].tolist()
+
+# Dosyaların saklanacağı klasör yolu
+dizin = "/Users/alikara/Desktop/BORSA OKUNACAKLAR/MALI TABLOLAR"
+
+# Klasördeki mevcut dosyaları kontrol et
+mevcut_dosyalar = os.listdir(dizin)
+
+for hisse in hisseler:
+    dosya_adı = f"{hisse}.xlsx"
+
+    # Eğer hisseye ait dosya klasörde mevcutsa atla
+    if dosya_adı in mevcut_dosyalar:
+        print(f"{hisse} için dosya zaten mevcut, atlanıyor.")
+        continue
+
+    # Hisse için mali tablo oluşturma işlemleri
+    tarihler = []
+    yıllar = []
+    donemler = []
+    grup = []
+
+    try:
+        # İlgili siteye istek gönder ve veriyi çek
+        url1 = "https://www.isyatirim.com.tr/tr-tr/analiz/hisse/Sayfalar/sirket-karti.aspx?hisse=" + hisse
+        r1 = requests.get(url1)
+        soup = BeautifulSoup(r1.text, "html.parser")
+
+        # Mali tablo seçim elementlerini bul
+        secim = soup.find("select", id="ddlMaliTabloFirst")
+        secim2 = soup.find("select", id="ddlMaliTabloGroup")
+
+        if not secim or not secim2:
+            print(f"{hisse} için mali tablo verisi bulunamadı, atlanıyor.")
+            continue
+
+        # Seçilen tablo ve grup bilgilerini çek
+        cocuklar = secim.findChildren("option")
+        grup = secim2.find("option")["value"]
+
+        # Tarih ve dönem bilgilerini topla
+        for i in cocuklar:
+            tarihler.append(i.string.rsplit("/"))
+        for j in tarihler:
+            yıllar.append(j[0])
+            donemler.append(j[1])
+
+        # En az 4 tarih-dönem bilgisi olmalı
+        if len(tarihler) < 4:
+            print(f"{hisse} için yeterli mali tablo verisi yok, atlanıyor.")
+            continue
+
+        # Mali tablo verilerini çek
+        parametreler = (
+            ("companyCode", hisse),
+            ("exchange", "TRY"),
+            ("financialGroup", grup),
+            ("year1", yıllar[0]),
+            ("period1", donemler[0]),
+            ("year2", yıllar[1]),
+            ("period2", donemler[1]),
+            ("year3", yıllar[2]),
+            ("period3", donemler[2]),
+            ("year4", yıllar[3]),
+            ("period4", donemler[3])
+        )
+        url2 = "https://www.isyatirim.com.tr/_layouts/15/Isyatirim.Website/Common/Data.aspx/MaliTablo"
+        r2 = requests.get(url2, params=parametreler).json()["value"]
+        veri = pd.DataFrame.from_dict(r2)
+        veri.drop(columns=["itemCode", "itemDescEng"], inplace=True)
+
+    except (AttributeError, KeyError, requests.exceptions.RequestException) as e:
+        # Hata varsa hisse atlanır ve hata mesajı gösterilir
+        print(f"{hisse} için veri alınamadı, hata: {e}, atlanıyor.")
+        continue
+
+    del tarihler[0:4]
+    tumveri = [veri]
+
+    for _ in range(0, 7):
+        if len(tarihler) == len(yıllar):
+            del tarihler[0:4]
+        else:
+            yıllar = []
+            donemler = []
+            for j in tarihler:
+                yıllar.append(j[0])
+                donemler.append(j[1])
+
+            if len(tarihler) >= 4:
+                parametreler2 = (
+                    ("companyCode", hisse),
+                    ("exchange", "TRY"),
+                    ("financialGroup", grup),
+                    ("year1", yıllar[0]),
+                    ("period1", donemler[0]),
+                    ("year2", yıllar[1]),
+                    ("period2", donemler[1]),
+                    ("year3", yıllar[2]),
+                    ("period3", donemler[2]),
+                    ("year4", yıllar[3]),
+                    ("period4", donemler[3])
+                )
+
+                try:
+                    r3 = requests.get(url2, params=parametreler2).json()["value"]
+                    veri2 = pd.DataFrame.from_dict(r3)
+                    veri2.drop(columns=["itemCode", "itemDescTr", "itemDescEng"], inplace=True)
+                    tumveri.append(veri2)
+                except (KeyError, requests.exceptions.RequestException) as e:
+                    print(f"{hisse} için ek veri alınamadı, hata: {e}, devam ediliyor.")
+                    continue
+
+    # Veri birleştirme ve Excel dosyası oluşturma
+    veri3 = pd.concat(tumveri, axis=1)
+    baslık = ["Bilanco"]
+    for i in cocuklar:
+        baslık.append(i.string)
+
+    baslıkfark = len(baslık) - len(veri3.columns)
+
+    if baslıkfark != 0:
+        del baslık[-baslıkfark:]
+
+    veri3 = veri3.set_axis(baslık, axis=1)
+    veri3[baslık[1:]] = veri3[baslık[1:]].astype(float)
+    veri3 = veri3.fillna(0)
+
+    # Excel dosyasını oluştur ve kaydet
+    with pd.ExcelWriter(os.path.join(dizin, dosya_adı), engine='xlsxwriter') as writer:
+        veri3.to_excel(writer, sheet_name=hisse, index=False)
+
+    # Yeni Excel dosyası oluşturulduğunda bildirim ver
+    print(f"{hisse} için yeni Excel dosyası oluşturuldu: {dosya_adı}")
